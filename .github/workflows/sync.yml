@@ -1,0 +1,137 @@
+name: Sync Upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每日 UTC 03:00（UTC+8 11:00）与上游同步
+    - cron: '0 3 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/HMCL-dev/HMCL.git
+          else
+            git remote add upstream https://github.com/HMCL-dev/HMCL.git
+          fi
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+          git fetch --prune upstream '+refs/heads/*:refs/remotes/upstream/*'
+
+      - name: Rebuild the upstream history without the excluded commits
+        id: base
+        run: |
+          set -euo pipefail
+          if ! git rev-parse --verify --quiet origin/sync-base >/dev/null; then
+            echo "::error::the sync-base branch is missing, it records the last upstream commit that was synchronized"
+            exit 1
+          fi
+          OLD_BASE=$(git rev-parse origin/sync-base)
+
+          git checkout -B upstream-minus-excluded upstream/main
+          while read -r line || [ -n "$line" ]; do
+            sha=$(printf '%s' "$line" | tr -d '[:space:]')
+            [ -n "$sha" ] || continue
+            case "$sha" in \#*) continue ;; esac
+            if git merge-base --is-ancestor "$sha" upstream-minus-excluded; then
+              echo "::notice::excluding $sha from the upstream history"
+              git rebase --onto "$sha^" "$sha" upstream-minus-excluded
+            else
+              echo "::notice::$sha is not part of the upstream history, skipping"
+            fi
+          done < .github/sync-excluded-commits.txt
+
+          NEW_BASE=$(git rev-parse upstream-minus-excluded)
+          echo "old_base=$OLD_BASE" >> "$GITHUB_OUTPUT"
+          echo "new_base=$NEW_BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Check for upstream changes
+        id: check
+        run: |
+          set -euo pipefail
+          if git diff --quiet "${{ steps.base.outputs.old_base }}" "${{ steps.base.outputs.new_base }}"; then
+            echo "::notice::the upstream content is unchanged, nothing to synchronize"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --stat "${{ steps.base.outputs.old_base }}" "${{ steps.base.outputs.new_base }}" | tail -20
+          fi
+
+      - name: Replay the fork-specific commits
+        if: ${{ steps.check.outputs.changed == 'true' }}
+        id: replay
+        run: |
+          set -euo pipefail
+          OLD_BASE="${{ steps.base.outputs.old_base }}"
+          NEW_BASE="${{ steps.base.outputs.new_base }}"
+
+          git checkout main
+          MOVED_TAGS=()
+          mapfile -t OLD_COMMITS < <(git rev-list --reverse "$OLD_BASE"..main)
+
+          git rebase --onto "$NEW_BASE" "$OLD_BASE" main
+          mapfile -t NEW_COMMITS < <(git rev-list --reverse "$NEW_BASE"..main)
+
+          if [ "${#OLD_COMMITS[@]}" -ne "${#NEW_COMMITS[@]}" ]; then
+            echo "::warning::the number of fork-specific commits changed, release tags are left untouched"
+          else
+            for i in "${!OLD_COMMITS[@]}"; do
+              old="${OLD_COMMITS[$i]}"
+              new="${NEW_COMMITS[$i]}"
+              for tag in $(git tag --points-at "$old"); do
+                echo "::notice::moving tag $tag to $new"
+                git tag -f "$tag" "$new"
+                MOVED_TAGS+=("$tag")
+              done
+            done
+          fi
+          echo "moved_tags=${MOVED_TAGS[*]:-}" >> "$GITHUB_OUTPUT"
+          echo "fork_commits=${#NEW_COMMITS[@]}" >> "$GITHUB_OUTPUT"
+
+      - name: Push
+        if: ${{ steps.check.outputs.changed == 'true' }}
+        env:
+          OLD_BASE: ${{ steps.base.outputs.old_base }}
+          NEW_BASE: ${{ steps.base.outputs.new_base }}
+          MOVED_TAGS: ${{ steps.replay.outputs.moved_tags }}
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin main
+          git push --force-with-lease="refs/heads/sync-base:$OLD_BASE" origin "$NEW_BASE:refs/heads/sync-base"
+          for tag in $MOVED_TAGS; do
+            git push --force origin "refs/tags/$tag"
+          done
+
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "### Sync Upstream"
+            echo
+            if [ "${{ steps.base.outcome }}" != "success" ]; then
+              echo "- 同步失败，未推送任何内容。"
+            elif [ "${{ steps.check.outputs.changed }}" = "true" ]; then
+              echo "- 上游内容有变化，main 已基于新的上游提交重建。"
+              echo "- 新基线: \`${{ steps.base.outputs.new_base }}\`"
+              echo "- fork 自身提交数: ${{ steps.replay.outputs.fork_commits }}"
+            else
+              echo "- 上游内容无变化，未推送任何内容。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
