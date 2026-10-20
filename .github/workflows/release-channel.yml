@@ -35,13 +35,24 @@ jobs:
         with:
           cache-cleanup: never
       - name: Prepare signature key
-        # The key is a file path on the build agent, so the secret has to be materialized first.
+        # The build reads a raw PKCS#8 DER file (KeyFactory + PKCS8EncodedKeySpec),
+        # so the secret holds its base64 encoding. A PEM text is accepted as well
+        # and is converted here.
         if: ${{ secrets.HMCL_SIGNATURE_KEY != '' }}
         env:
           HMCL_SIGNATURE_KEY_CONTENT: ${{ secrets.HMCL_SIGNATURE_KEY }}
         run: |
-          printf '%s' "$HMCL_SIGNATURE_KEY_CONTENT" > "$RUNNER_TEMP/hmcl-signature-key.pem"
-          echo "HMCL_SIGNATURE_KEY=$RUNNER_TEMP/hmcl-signature-key.pem" >> "$GITHUB_ENV"
+          set -euo pipefail
+          KEY_FILE="$RUNNER_TEMP/hmcl-signature-key.der"
+          if printf '%s' "$HMCL_SIGNATURE_KEY_CONTENT" | base64 -d > "$KEY_FILE" 2>/dev/null \
+             && openssl pkcs8 -inform DER -in "$KEY_FILE" -nocrypt -out /dev/null 2>/dev/null; then
+            echo "使用 base64 编码的 PKCS#8 DER 私钥"
+          else
+            printf '%s' "$HMCL_SIGNATURE_KEY_CONTENT" > "$RUNNER_TEMP/hmcl-signature-key.pem"
+            openssl pkcs8 -topk8 -nocrypt -in "$RUNNER_TEMP/hmcl-signature-key.pem" -outform DER -out "$KEY_FILE"
+            echo "已将 PEM 私钥转换为 PKCS#8 DER"
+          fi
+          echo "HMCL_SIGNATURE_KEY=$KEY_FILE" >> "$GITHUB_ENV"
       - name: Build
         run: ./gradlew clean makeExecutables makeDeb --stacktrace --no-daemon
         env:
