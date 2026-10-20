@@ -2,6 +2,15 @@ name: Create Release
 
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: '发布通道'
+        required: true
+        type: choice
+        options:
+          - dev
+          - stable
+        default: dev
   schedule:
     # 每日 UTC 18:30（UTC+8 次日 02:30）产出开发版（dev 通道）
     - cron: '30 18 * * *'
@@ -14,7 +23,7 @@ permissions:
 jobs:
   release-dev:
     name: release-dev
-    if: ${{ (github.repository_owner == 'HMCL-dev' || github.repository_owner == 'untainted-launcher') && (github.event_name == 'workflow_dispatch' || github.event.schedule == '30 18 * * *') }}
+    if: ${{ (github.repository_owner == 'HMCL-dev' || github.repository_owner == 'untained-launcher') && ((github.event_name == 'schedule' && github.event.schedule == '30 18 * * *') || (github.event_name == 'workflow_dispatch' && inputs.channel == 'dev')) }}
     uses: ./.github/workflows/release-channel.yml
     with:
       channel: dev
@@ -22,7 +31,7 @@ jobs:
 
   release-stable:
     name: release-stable
-    if: ${{ (github.repository_owner == 'HMCL-dev' || github.repository_owner == 'untainted-launcher') && (github.event_name == 'workflow_dispatch' || github.event.schedule == '30 19 * * 1') }}
+    if: ${{ (github.repository_owner == 'HMCL-dev' || github.repository_owner == 'untained-launcher') && ((github.event_name == 'schedule' && github.event.schedule == '30 19 * * 1') || (github.event_name == 'workflow_dispatch' && inputs.channel == 'stable')) }}
     uses: ./.github/workflows/release-channel.yml
     with:
       channel: stable
