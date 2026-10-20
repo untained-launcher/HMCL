@@ -38,11 +38,16 @@ jobs:
         # The build reads a raw PKCS#8 DER file (KeyFactory + PKCS8EncodedKeySpec),
         # so the secret holds its base64 encoding. A PEM text is accepted as well
         # and is converted here.
-        if: ${{ secrets.HMCL_SIGNATURE_KEY != '' }}
+        # The secret context is not available in step-level `if` conditions,
+        # so the emptiness check has to happen inside the script.
         env:
           HMCL_SIGNATURE_KEY_CONTENT: ${{ secrets.HMCL_SIGNATURE_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "$HMCL_SIGNATURE_KEY_CONTENT" ]; then
+            echo "未配置 HMCL_SIGNATURE_KEY，跳过签名"
+            exit 0
+          fi
           KEY_FILE="$RUNNER_TEMP/hmcl-signature-key.der"
           if printf '%s' "$HMCL_SIGNATURE_KEY_CONTENT" | base64 -d > "$KEY_FILE" 2>/dev/null \
              && openssl pkcs8 -inform DER -in "$KEY_FILE" -nocrypt -out /dev/null 2>/dev/null; then
