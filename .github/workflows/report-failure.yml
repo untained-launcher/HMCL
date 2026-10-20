@@ -1,0 +1,119 @@
+name: Report CI Failure
+
+on:
+  workflow_run:
+    workflows:
+      - Create Release
+      - Sync Upstream
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+jobs:
+  report:
+    name: report
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'timed_out' }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+      TRIGGER_EVENT: ${{ github.event.workflow_run.event }}
+      BRANCH: ${{ github.event.workflow_run.head_branch }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+    steps:
+      - name: Collect the failed jobs
+        run: |
+          set -uo pipefail
+          {
+            gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+              --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | "- **\(.name)** — 失败步骤: \(.steps | map(select(.conclusion == "failure" or .conclusion == "timed_out") | .name) | join("、"))"' \
+              || true
+          } > failed-jobs.md
+          if [ ! -s failed-jobs.md ]; then
+            gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+              --jq '.jobs[] | "- **\(.name)** — \(.conclusion)"' \
+              >> failed-jobs.md || echo "- (无法获取任务列表)" >> failed-jobs.md
+          fi
+          cat failed-jobs.md
+
+      - name: Download the logs
+        run: |
+          set -uo pipefail
+          if gh run view "$RUN_ID" --repo "$REPO" --log-failed > failed.log 2>/dev/null && [ -s failed.log ]; then
+            echo "已获取失败步骤的日志"
+          elif gh run view "$RUN_ID" --repo "$REPO" --log > failed.log 2>/dev/null && [ -s failed.log ]; then
+            echo "已获取完整日志"
+          else
+            echo "(无法获取日志，请查看运行链接)" > failed.log
+          fi
+          wc -c failed.log
+
+      - name: Truncate the log
+        run: |
+          set -uo pipefail
+          MAX=55000
+          SIZE=$(wc -c < failed.log)
+          if [ "$SIZE" -gt "$MAX" ]; then
+            HEAD=2000
+            TAIL=$((MAX - HEAD - 300))
+            {
+              printf '> 日志共 %s 字节，以下仅保留开头 %s 字节与结尾 %s 字节，中间部分已省略。完整日志见运行链接。\n\n' "$SIZE" "$HEAD" "$TAIL"
+              head -c "$HEAD" failed.log
+              printf '\n\n…（中间 %s 字节已省略）…\n\n' "$((SIZE - HEAD - TAIL))"
+              tail -c "$TAIL" failed.log
+            } > failed-truncated.log
+          else
+            cp failed.log failed-truncated.log
+          fi
+          wc -c failed-truncated.log
+
+      - name: Build the issue body
+        run: |
+          set -uo pipefail
+          {
+            echo "## CI 运行失败"
+            echo
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| 工作流 | $WORKFLOW_NAME |"
+            echo "| 触发事件 | $TRIGGER_EVENT |"
+            echo "| 分支 | $BRANCH |"
+            echo "| 提交 | \`$SHA\` |"
+            echo "| 运行编号 | $RUN_NUMBER |"
+            echo "| 结论 | $CONCLUSION |"
+            echo "| 运行链接 | $RUN_URL |"
+            echo
+            echo "### 失败的任务"
+            echo
+            cat failed-jobs.md
+            echo
+            echo "### 日志"
+            echo
+            echo '```'
+            cat failed-truncated.log
+            echo '```'
+          } > body.md
+          wc -c body.md
+
+      - name: Create or update the issue
+        run: |
+          set -uo pipefail
+          TITLE="CI 失败: $WORKFLOW_NAME ($BRANCH)"
+          SEARCH="CI 失败: $WORKFLOW_NAME ("
+          EXISTING=$(gh issue list --state open --limit 100 --json number,title \
+            --jq "[.[] | select(.title | startswith(\"$SEARCH\"))][0].number // empty")
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body-file body.md
+            echo "已在 issue #$EXISTING 下追加本次失败的日志"
+          else
+            gh issue create --title "$TITLE" --body-file body.md
+            echo "已创建 issue: $TITLE"
+          fi
