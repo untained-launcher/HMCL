@@ -14,18 +14,16 @@ permissions:
 jobs:
   release-dev:
     name: release-dev
-    if: ${{ github.repository_owner == 'HMCL-dev' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '30 18 * * *') }}
+    if: ${{ (github.repository_owner == 'HMCL-dev' || github.repository_owner == 'untainted-launcher') && (github.event_name == 'workflow_dispatch' || github.event.schedule == '30 18 * * *') }}
     uses: ./.github/workflows/release-channel.yml
     with:
       channel: dev
-      task: checkUpdateDev
     secrets: inherit
 
   release-stable:
     name: release-stable
-    if: ${{ github.repository_owner == 'HMCL-dev' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '30 19 * * 1') }}
+    if: ${{ (github.repository_owner == 'HMCL-dev' || github.repository_owner == 'untainted-launcher') && (github.event_name == 'workflow_dispatch' || github.event.schedule == '30 19 * * 1') }}
     uses: ./.github/workflows/release-channel.yml
     with:
       channel: stable
-      task: checkUpdateStable
     secrets: inherit
