@@ -1,0 +1,293 @@
+name: Sync Upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每日 UTC 03:00（UTC+8 11:00）与上游同步
+    - cron: '0 3 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # 重放提交需要 committer 身份，runner 默认没有配置，缺失时 rebase 会以
+      # "empty ident name" 失败。使用 GitHub Actions 官方机器人身份，不涉及任何个人信息。
+      - name: Configure git identity
+        run: |
+          set -euo pipefail
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/HMCL-dev/HMCL.git
+          else
+            git remote add upstream https://github.com/HMCL-dev/HMCL.git
+          fi
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+          git fetch --prune upstream '+refs/heads/*:refs/remotes/upstream/*'
+
+      - name: Rebuild the upstream history without the excluded commits
+        id: base
+        run: |
+          set -euo pipefail
+          if ! git rev-parse --verify --quiet origin/sync-base >/dev/null; then
+            echo "::error::the sync-base branch is missing, it records the last upstream commit that was synchronized"
+            exit 1
+          fi
+          OLD_BASE=$(git rev-parse origin/sync-base)
+
+          # 排除清单只存在于本 fork，上游没有该文件；切到上游历史后工作区会被覆盖，
+          # 因此必须在切换分支前读入内存。
+          mapfile -t EXCLUDED < .github/sync-excluded-commits.txt
+
+          # 受保护路径同样在切换分支前读取，并在生成基线前用 fork 的版本覆盖上游。
+          FORK_MAIN=$(git rev-parse main)
+          PROTECTED_PATHS=()
+          if [ -f .github/sync-protected-paths.txt ]; then
+            while IFS= read -r line || [ -n "$line" ]; do
+              path=$(printf '%s' "$line" | sed 's/[[:space:]]*$//')
+              [ -n "$path" ] || continue
+              case "$path" in \#*) continue ;; esac
+              PROTECTED_PATHS+=("$path")
+            done < .github/sync-protected-paths.txt
+          fi
+
+          # 逐行解析，不能用 tr 对整段文本去空白，否则换行会被一并删除而丢光所有条目。
+          EXCLUDED_SHA=()
+          for line in "${EXCLUDED[@]}"; do
+            sha=$(printf '%s' "$line" | tr -d '[:space:]')
+            [ -n "$sha" ] || continue
+            case "$sha" in \#*) continue ;; esac
+            EXCLUDED_SHA+=("$sha")
+          done
+          if [ "${#EXCLUDED_SHA[@]}" -eq 0 ] && grep -qvE '^[[:space:]]*(#|$)' .github/sync-excluded-commits.txt; then
+            echo "::error::the excluded commit list has entries but none could be parsed"
+            exit 1
+          fi
+
+          # 记录被排除提交新建的文件。这些文件本就不该出现在 fork 中，因此上游后续
+          # 对它们的改动在重放时必然产生 modify/delete 冲突，应保留删除状态而不是接受改动。
+          INTRODUCED_FILES=()
+          for sha in "${EXCLUDED_SHA[@]}"; do
+            while read -r path; do
+              [ -n "$path" ] && INTRODUCED_FILES+=("$path")
+            done < <(git show --diff-filter=A --name-only --format= "$sha")
+          done
+
+          # 解决因排除提交而出现的 modify/delete 冲突：当冲突路径全部来自被排除提交
+          # 新建的文件时，保留删除状态并继续重放；否则说明是真实冲突，报错退出。
+          resolve_excluded_conflicts() {
+            local excluded_sha=$1
+            local conflicts path unexpected=0 is_introduced
+
+            conflicts=$(git diff --name-only --diff-filter=U)
+
+            # 没有冲突文件说明重放并非因冲突失败，不能当作可跳过的空提交处理。
+            if [ -z "$conflicts" ]; then
+              echo "::error::rebase failed without conflicts while excluding $excluded_sha"
+              git rebase --abort || true
+              return 1
+            fi
+
+            for path in $conflicts; do
+              is_introduced=0
+              for introduced in "${INTRODUCED_FILES[@]}"; do
+                [ "$introduced" = "$path" ] && is_introduced=1 && break
+              done
+              if [ "$is_introduced" -ne 1 ]; then
+                echo "::error::unexpected conflict on $path while excluding $excluded_sha"
+                unexpected=1
+              fi
+            done
+            if [ "$unexpected" -ne 0 ]; then
+              echo "::error::refusing to drop upstream changes outside the excluded files"
+              git rebase --abort || true
+              return 1
+            fi
+
+            for path in $conflicts; do
+              echo "::notice::dropping changes to $path, it is introduced by the excluded commit"
+              git rm --quiet --ignore-unmatch -- "$path"
+            done
+
+            # 该提交可能因为其改动全部落在被排除文件中而变空，此时直接跳过。
+            if git diff --cached --quiet && git diff --quiet; then
+              echo "::notice::the conflicting commit becomes empty after exclusion, skipping it"
+              GIT_EDITOR=true git rebase --skip
+            else
+              GIT_EDITOR=true git rebase --continue
+            fi
+          }
+
+          git checkout -B upstream-minus-excluded upstream/main
+          for sha in "${EXCLUDED_SHA[@]}"; do
+            if git merge-base --is-ancestor "$sha" upstream-minus-excluded; then
+              echo "::notice::excluding $sha from the upstream history"
+              git rebase --onto "$sha^" "$sha" upstream-minus-excluded ||
+                resolve_excluded_conflicts "$sha"
+            else
+              echo "::notice::$sha is not part of the upstream history, skipping"
+            fi
+          done
+
+          # 受保护路径始终以 fork 为准：先整体删除上游版本（含上游新增的文件），
+          # 再从 fork 的主分支恢复。这样上游对 CI 的改动既不会混入，也不会在重放时冲突。
+          if [ "${#PROTECTED_PATHS[@]}" -gt 0 ]; then
+            for path in "${PROTECTED_PATHS[@]}"; do
+              git rm -r --quiet --ignore-unmatch -- "$path"
+              git checkout "$FORK_MAIN" -- "$path"
+            done
+            if ! git diff --cached --quiet; then
+              git commit --quiet -m "ci: 同步时保留 fork 的受保护路径"
+              echo "::notice::restored the protected paths from the fork"
+            fi
+          fi
+
+          NEW_BASE=$(git rev-parse upstream-minus-excluded)
+          echo "old_base=$OLD_BASE" >> "$GITHUB_OUTPUT"
+          echo "new_base=$NEW_BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Check for upstream changes
+        id: check
+        run: |
+          set -euo pipefail
+          if git diff --quiet "${{ steps.base.outputs.old_base }}" "${{ steps.base.outputs.new_base }}"; then
+            echo "::notice::the upstream content is unchanged, nothing to synchronize"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --stat "${{ steps.base.outputs.old_base }}" "${{ steps.base.outputs.new_base }}" | tail -20
+          fi
+
+      - name: Replay the fork-specific commits
+        if: ${{ steps.check.outputs.changed == 'true' }}
+        id: replay
+        run: |
+          set -euo pipefail
+          OLD_BASE="${{ steps.base.outputs.old_base }}"
+          NEW_BASE="${{ steps.base.outputs.new_base }}"
+
+          PROTECTED_PATHS=()
+          while IFS= read -r line || [ -n "$line" ]; do
+            path=$(printf '%s' "$line" | sed 's/[[:space:]]*$//')
+            [ -n "$path" ] || continue
+            case "$path" in \#*) continue ;; esac
+            PROTECTED_PATHS+=("$path")
+          done < .github/sync-protected-paths.txt
+
+          is_protected_path() {
+            local file=$1 protected
+            for protected in "${PROTECTED_PATHS[@]}"; do
+              [ "$file" = "$protected" ] && return 0
+              case "$file" in "$protected"/*) return 0 ;; esac
+            done
+            return 1
+          }
+
+          git checkout main
+          MOVED_TAGS=()
+          SKIPPED=0
+          mapfile -t OLD_COMMITS < <(git rev-list --reverse "$OLD_BASE"..main)
+
+          # 新基线已包含受保护路径的 fork 版本，重放这些改动必然冲突。
+          # 仅当被停下的提交只改动受保护路径时才整条跳过，否则报错交人工处理。
+          if ! git rebase --onto "$NEW_BASE" "$OLD_BASE" main; then
+            for _ in $(seq 1 200); do
+              [ -d "$(git rev-parse --git-path rebase-merge)" ] || break
+              stopped=$(cat "$(git rev-parse --git-path rebase-merge/stopped-sha)" 2>/dev/null || true)
+              if [ -z "$stopped" ]; then
+                echo "::error::cannot determine the commit that stopped the rebase"
+                git rebase --abort
+                exit 1
+              fi
+
+              unsafe=0
+              while read -r file; do
+                [ -n "$file" ] || continue
+                is_protected_path "$file" || unsafe=1
+              done < <(git show --name-only --format= "$stopped")
+
+              if [ "$unsafe" -ne 0 ]; then
+                echo "::error::conflict in $(git log --oneline -1 "$stopped") touches files outside the protected paths"
+                git rebase --abort
+                exit 1
+              fi
+
+              echo "::notice::skipping $(git log --oneline -1 "$stopped"), it only touches protected paths"
+              SKIPPED=$((SKIPPED + 1))
+              git rebase --skip || true
+            done
+
+            if [ -d "$(git rev-parse --git-path rebase-merge)" ]; then
+              echo "::error::the rebase did not finish after skipping protected-path commits"
+              git rebase --abort
+              exit 1
+            fi
+          fi
+
+          mapfile -t NEW_COMMITS < <(git rev-list --reverse "$NEW_BASE"..main)
+
+          if [ "${#OLD_COMMITS[@]}" -ne "${#NEW_COMMITS[@]}" ]; then
+            echo "::warning::the number of fork-specific commits changed ($SKIPPED skipped), release tags are left untouched"
+          else
+            for i in "${!OLD_COMMITS[@]}"; do
+              old="${OLD_COMMITS[$i]}"
+              new="${NEW_COMMITS[$i]}"
+              for tag in $(git tag --points-at "$old"); do
+                echo "::notice::moving tag $tag to $new"
+                git tag -f "$tag" "$new"
+                MOVED_TAGS+=("$tag")
+              done
+            done
+          fi
+          echo "moved_tags=${MOVED_TAGS[*]:-}" >> "$GITHUB_OUTPUT"
+          echo "fork_commits=${#NEW_COMMITS[@]}" >> "$GITHUB_OUTPUT"
+          echo "skipped=${SKIPPED}" >> "$GITHUB_OUTPUT"
+
+      - name: Push
+        if: ${{ steps.check.outputs.changed == 'true' }}
+        env:
+          OLD_BASE: ${{ steps.base.outputs.old_base }}
+          NEW_BASE: ${{ steps.base.outputs.new_base }}
+          MOVED_TAGS: ${{ steps.replay.outputs.moved_tags }}
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin main
+          git push --force-with-lease="refs/heads/sync-base:$OLD_BASE" origin "$NEW_BASE:refs/heads/sync-base"
+          for tag in $MOVED_TAGS; do
+            git push --force origin "refs/tags/$tag"
+          done
+
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "### Sync Upstream"
+            echo
+            if [ "${{ steps.base.outcome }}" != "success" ]; then
+              echo "- 同步失败，未推送任何内容。"
+            elif [ "${{ steps.check.outputs.changed }}" = "true" ]; then
+              echo "- 上游内容有变化，main 已基于新的上游提交重建。"
+              echo "- 新基线: \`${{ steps.base.outputs.new_base }}\`"
+              echo "- fork 自身提交数: ${{ steps.replay.outputs.fork_commits }}"
+            else
+              echo "- 上游内容无变化，未推送任何内容。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
