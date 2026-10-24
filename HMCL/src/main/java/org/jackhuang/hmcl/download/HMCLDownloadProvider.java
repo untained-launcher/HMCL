@@ -46,7 +46,7 @@ public final class HMCLDownloadProvider extends DownloadProvider {
             DownloadSource source,
             WebURL defaultUrl, WebURL bmclapiUrl
     ) {
-        if (LocaleUtils.IS_CHINA_MAINLAND) {
+        if ("CN".equals(RegionUtils.MACHINE_REGION)) {
             return switch (source) {
                 case DEFAULT, OFFICIAL -> DownloadCandidates.of(defaultUrl, bmclapiUrl);
                 case MIRROR -> DownloadCandidates.of(bmclapiUrl, defaultUrl);
@@ -66,7 +66,7 @@ public final class HMCLDownloadProvider extends DownloadProvider {
 
         // true means prefer mirror, false means prefer official, null means do not use mirror
         @Nullable Boolean mirrorFirst;
-        if (LocaleUtils.IS_CHINA_MAINLAND) {
+        if ("CN".equals(RegionUtils.MACHINE_REGION)) {
             mirrorFirst = switch (source) {
                 case DEFAULT, MIRROR -> true;
                 case OFFICIAL -> false;
@@ -224,7 +224,7 @@ public final class HMCLDownloadProvider extends DownloadProvider {
 
     @Override
     public DownloadCandidates getCleanroomVersionListCandidates() {
-        return LocaleUtils.IS_CHINA_MAINLAND
+        return "CN".equals(RegionUtils.MACHINE_REGION)
                 ? DownloadCandidates.of(CleanroomRemoteVersion.LOADER_LIST_URL, WebURL.parse("https://alist.8mi.tech/d/mirror/HMCL-Metadata/Auto/cleanroom/index.json"))
                 : DownloadCandidates.of(CleanroomRemoteVersion.LOADER_LIST_URL);
     }
