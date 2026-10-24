@@ -91,7 +91,7 @@ public final class TerracottaMetadata {
             }
 
             Stream<String> stream = downloads.stream(), streamCN = downloadsCN.stream();
-            @Unmodifiable List<WebURL> links = (LocaleUtils.IS_CHINA_MAINLAND ? Stream.concat(streamCN, stream) : Stream.concat(stream, streamCN))
+            @Unmodifiable List<WebURL> links = ("CN".equals(RegionUtils.MACHINE_REGION) ? Stream.concat(streamCN, stream) : Stream.concat(stream, streamCN))
                     .map(link -> WebURL.parse(options.replace(link)))
                     .toList();
 
