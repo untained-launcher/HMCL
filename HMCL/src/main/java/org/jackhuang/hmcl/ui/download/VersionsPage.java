@@ -376,6 +376,7 @@ public final class VersionsPage extends Control implements WizardPage, Refreshab
 
                 transitionPane = new TransitionPane();
                 spinner = new JFXSpinner();
+                TransitionPane.setCacheAllowed(spinner, false);
 
                 StackPane centerWrapper = new StackPane();
                 centerWrapper.setStyle("-fx-padding: 10;");
@@ -432,9 +433,10 @@ public final class VersionsPage extends Control implements WizardPage, Refreshab
                 }
 
                 FXUtils.onChangeAndOperate(control.status, status -> {
-                    if (status == Status.LOADING)
+                    TransitionPane.setCacheAllowed(control, status != Status.LOADING);
+                    if (status == Status.LOADING) {
                         transitionPane.setContent(spinner, ContainerAnimations.FADE);
-                    else if (status == Status.SUCCESS)
+                    } else if (status == Status.SUCCESS)
                         if (control.versions.isEmpty()) {
                             transitionPane.setContent(emptyPane, ContainerAnimations.FADE);
                         } else {
