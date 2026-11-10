@@ -14,7 +14,7 @@ import org.jackhuang.hmcl.game.GameComponentType;
 import org.jackhuang.hmcl.game.HMCLCacheRepository;
 import org.jackhuang.hmcl.setting.DownloadSource;
 import org.jackhuang.hmcl.task.Task;
-import org.jackhuang.hmcl.util.i18n.LocaleUtils;
+import org.jackhuang.hmcl.util.RegionUtils;
 import org.jackhuang.hmcl.util.versioning.GameVersionNumber;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
@@ -163,7 +163,7 @@ public final class HMCLDownloadProvider extends DownloadProvider {
                 Task<ComponentRemoteVersionList<ForgeRemoteVersion>> fetchOfficial = ForgeRemoteVersion.fetchAsync(this, gameVersion);
 
                 DownloadSource source = versionListSource;
-                if (!LocaleUtils.IS_CHINA_MAINLAND && (source == DownloadSource.DEFAULT || source == DownloadSource.OFFICIAL)) {
+                if (source == DownloadSource.DEFAULT || source == DownloadSource.OFFICIAL) {
                     return fetchOfficial;
                 }
 
@@ -178,7 +178,7 @@ public final class HMCLDownloadProvider extends DownloadProvider {
                 Task<ComponentRemoteVersionList<NeoForgeRemoteVersion>> fetchOfficial = NeoForgeRemoteVersion.fetchAsync(this, gameVersion);
 
                 DownloadSource source = versionListSource;
-                if (!LocaleUtils.IS_CHINA_MAINLAND && (source == DownloadSource.DEFAULT || source == DownloadSource.OFFICIAL)) {
+                if (source == DownloadSource.DEFAULT || source == DownloadSource.OFFICIAL) {
                     return fetchOfficial;
                 }
                 Task<ComponentRemoteVersionList<NeoForgeRemoteVersion>> fetchBMCL = NeoForgeRemoteVersion.fetchBMCLAsync(bmclRoot, gameVersion);
