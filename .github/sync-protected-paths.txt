@@ -1,0 +1,15 @@
+# 同步时始终以本 fork 版本为准的路径（每行一个文件）
+#
+# merge 上游后会用 fork 版本覆盖这些路径：上游对它们的任何修改都不会进入
+# 本仓库，也不会造成同步冲突。
+#
+# 添加规则：确认该路径完全由本 fork 维护、且不需要接受上游更新，再写到这里。
+# 只需要跟上游的（如 .github/ISSUE_TEMPLATE）不要写进来。
+.github/sync-excluded-commits.txt
+.github/sync-protected-paths.txt
+.github/sync-removed-paths.txt
+.github/workflows/release-channel.yml
+.github/workflows/release.yml
+.github/workflows/report-failure.yml
+.github/workflows/sync.yml
+AGENTS.md

@@ -1,0 +1,12 @@
+# 同步时保持删除的上游路径（每行一个文件或目录）
+#
+# 上游新增或修改这些路径时，merge 后会被删除：本 fork 不使用上游的代码
+# 检查、镜像与 Gradle CI，改用自有的 release / sync 流程。
+#
+# 添加规则：确认本 fork 不需要该路径，再写到这里。
+.github/scripts
+.github/workflows/check-codes-comment.yml
+.github/workflows/check-codes.yml
+.github/workflows/gradle.yml
+.github/workflows/mirror.yml
+.github/workflows/pr-size-label.yml

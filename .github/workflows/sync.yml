@@ -1,0 +1,80 @@
+name: Sync Upstream
+
+# 本 fork 的历史 = 上游历史 + 本 fork 的提交：上游提交以原 SHA 合并进来，
+# 不再逐条重放。合并后强制应用 fork 的 `.github` 配置与 AGENTS.md。
+# 无法按清单裁决的冲突会中止合并并开 Issue。
+on:
+  workflow_dispatch:
+  schedule:
+    # 每日 UTC 03:00（UTC+8 11:00）与上游同步
+    - cron: '0 3 * * *'
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: sync
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge upstream
+        id: sync
+        env:
+          SYNC_GIT_NAME: ${{ vars.SYNC_GIT_NAME }}
+          SYNC_GIT_EMAIL: ${{ vars.SYNC_GIT_EMAIL }}
+        run: |
+          set -o pipefail
+          ./scripts/sync-upstream.sh 2>&1 | tee sync.log
+
+      - name: Create or update sync issue
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TITLE="[CI] 上游同步失败"
+
+          {
+            echo "## 上游同步失败"
+            echo
+            echo "- 运行：$RUN_URL"
+            echo "- 同步前提交：\`$SHA\`"
+            echo "- 上游：\`HMCL-dev/HMCL@main\`"
+            echo
+            echo "存在无法按既定清单裁决的冲突。本次未推送任何提交。"
+            echo "清单见 \`.github/sync-protected-paths.txt\` 与 \`.github/sync-removed-paths.txt\`。"
+            echo
+            echo "### 同步日志"
+            echo '```text'
+            tail -c 40000 sync.log 2>/dev/null || echo "（无日志；失败可能发生在 checkout 阶段）"
+            echo '```'
+            echo
+            echo "> 本 Issue 由 CI 自动创建 / 更新。"
+          } > report.md
+
+          num="$(gh issue list --repo "$REPO" --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")"
+          if [[ -n "$num" ]]; then
+            gh issue comment "$num" --repo "$REPO" --body-file report.md
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body-file report.md
+          fi
